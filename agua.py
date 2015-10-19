@@ -10,6 +10,14 @@ import tempfile
 import time
 from requests.auth import HTTPBasicAuth
 
+notokayextensions = ['png', 'woff', 'gif', 'jpeg', 'jpg', 'a']
+
+def okaytoclean(filename):
+    notokay = False
+    for ext in notokayextensions:
+        notokay = notokay or filename.endswith('.' + ext)
+    return not notokay
+
 devnull = open(os.devnull)
 
 print(time.strftime('%d %b %Y %H:%M:%S'))
@@ -67,9 +75,9 @@ def gettracked():
 
 def clean():
     changed = False
-    whitespace = re.compile(r'^\s*?(\r)?$')
+    whitespace = re.compile(r'^(.*?)(\r?\n?)$')
     for tracked in gettracked():
-        if not (tracked.endswith('.png') or tracked.endswith('.jpg') or tracked.endswith('.jpeg')):
+        if okaytoclean(tracked):
             if not changed:
                 shutil.copyfile(tracked, tracked + '.bk')
             with tempfile.TemporaryFile('r+a') as temp:
@@ -79,18 +87,17 @@ def clean():
                     crt = False
                     for line in orig:
                         match = whitespace.match(line)
-                        if match:
-                            line = '\n' if not match.group(1) else '\r\n'
-                        if line == '\n':
+                        newline = match.group(1).rstrip() + match.group(2)
+                        if newline == '\n':
                             blanklines += 1
-                        elif line == '\r\n':
+                        elif newline == '\r\n':
                             blanklines += 1
                             crt = True
                         else:
                             if blanklines and not first:
                                 for _ in range(blanklines):
                                     temp.write('\r\n' if crt else '\n')
-                            temp.write(line)
+                            temp.write(newline)
                             blanklines = 0
                             first = False
                             crt = False
@@ -114,6 +121,7 @@ for row in reader:
         if row[1] == 'pr':
             toclean = False
             prmerged = requests.get('https://api.github.com/repos/' + row[0] + '/pulls/' + row[2] + '/merge')
+            print('https://github.com/' + row[0] + '/pull/' + row[2])
             if prmerged.status_code == 204:
                 print('PR merged, deleting fork and rechecking')
                 requests.delete('https://api.github.com/repos/' + user + '/' + repo, headers=tokenheader)
@@ -125,13 +133,8 @@ for row in reader:
                     if prinfodict['state'] == 'closed':
                         print('PR closed')
                     else:
-                        prstatus = requests.get(prinfodict['statuses_url'], headers=tokenheader)
+                        resultrows.append(row)
 
-                        for status in prstatus.json():
-                            if status['state'] == 'error' or status['state'] == 'failure':
-                                print('CI failed, closing PR')
-                                requests.patch('https://api.github.com/repos/' + row[0] + '/pulls/' + row[2], data={'state': 'closed'}, headers=tokenheader)
-                                break
 
                 else:
                     print('GitHub API error')
@@ -140,27 +143,31 @@ for row in reader:
             checkhash = True
             hashagainst = row[2]
     if toclean:
-        subprocess.call(['hub', 'clone', row[0]])
+        print('Cloning...')
+        subprocess.call(['hub', 'clone', row[0]], stdout=devnull, stderr=devnull)
         os.chdir(repo)
         currenthash = subprocess.check_output(['hub', 'log', '-n', '1', '--pretty=format:"%H"'])[1:-1]
         if not checkhash or currenthash != hashagainst:
+            print('Trying to clean...')
             if clean():
-                subprocess.call(['hub', 'fork'])
-                subprocess.call(['hub', 'remote', 'set-url', 'origin', 'git@github.com:' + user + '/' + repo + '.git'])
-                subprocess.call(['hub', 'add', '.'])
-                subprocess.call(['hub', 'commit', '-m', 'Clean whitespace', '-m', 'Remove leading newlines; replace lines containing only whitespace with empty lines; replace multiple trailing newlines with a single newline'])
+                print('Forking...')
+                subprocess.call(['hub', 'fork'], stdout=devnull, stderr=devnull)
+                subprocess.call(['hub', 'remote', 'set-url', 'origin', 'git@github.com:' + user + '/' + repo + '.git'], stdout=devnull, stderr=devnull)
+                print('Committing...')
+                subprocess.call(['hub', 'add', '.'], stdout=devnull, stderr=devnull)
+                subprocess.call(['hub', 'commit', '-m', 'Clean whitespace', '-m', 'Remove leading newlines; replace lines containing only whitespace with empty lines; replace multiple trailing newlines with a single newline; remove trailing whitespace in lines'], stdout=devnull, stderr=devnull)
                 done = False
                 while not done:
                     time.sleep(5)
                     print('Trying to push...')
-                    done = subprocess.call(['hub', 'push', 'origin'], stderr=devnull) == 0
-                if raw_input('Do the thing [y/n]: ') == 'y':
-                    output = subprocess.check_output(['hub', 'pull-request', '-f', '-b', owner + ':master', '-m', 'Clean whitespace\n\nRemove leading newlines; replace lines containing only whitespace with empty lines; replace multiple trailing newlines with a single newline.\n\nThis PR was created semiautomatically.'])
-                    resultrows.append([row[0], 'pr', output[output.rfind('/') + 1:-1]])
-                else:
-                    resultrows.append(row)
+                    done = subprocess.call(['hub', 'push', 'origin'], stdout=devnull, stderr=devnull) == 0
+                output = subprocess.check_output(['hub', 'pull-request', '-f', '-b', owner + ':master', '-m', 'Clean whitespace\n\nRemove leading newlines; replace lines containing only whitespace with empty lines; replace multiple trailing newlines with a single newline; remove trailing whitespace in lines.\n\nThis PR was created semiautomatically.'])
+                resultrows.append([row[0], 'pr', output[output.rfind('/') + 1:-1]])
             else:
                 resultrows.append([row[0], 'hash', currenthash])
+        else:
+            print('Hash matched ' + hashagainst[:7])
+            resultrows.append(row)
         os.chdir('..')
         shutil.rmtree(repo)
 
